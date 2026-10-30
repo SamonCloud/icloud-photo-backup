@@ -1,0 +1,10 @@
+.build/
+dist/
+.DS_Store
+/VALIDATION.md
+.photo-backup/
+.env
+.env.*
+*.p12
+*.pfx
+*.mobileprovision
