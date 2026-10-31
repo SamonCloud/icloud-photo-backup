@@ -132,6 +132,7 @@ final class DirectoryCopyEngine {
     let destination: URL
     let includeHidden: Bool
     let keepExtras: Bool
+    let quickCheck: Bool
     let cancellation: CopyCancellation
     private let fm = FileManager.default
 
@@ -143,7 +144,7 @@ final class DirectoryCopyEngine {
             (!includeHidden && (url.lastPathComponent.hasPrefix(".") || (info.st_flags & UInt32(UF_HIDDEN)) != 0))
     }
 
-    init(source: URL, destination: URL, includeHidden: Bool, keepExtras: Bool = true, cancellation: CopyCancellation) throws {
+    init(source: URL, destination: URL, includeHidden: Bool, keepExtras: Bool = true, quickCheck: Bool = true, cancellation: CopyCancellation) throws {
         func canonical(_ url: URL) throws -> URL {
             guard let path = Darwin.realpath(url.path, nil) else { throw posixCopyError(url.path) }
             defer { free(path) }
@@ -152,6 +153,7 @@ final class DirectoryCopyEngine {
         self.source = try canonical(source)
         self.destination = try canonical(destination)
         self.includeHidden = includeHidden; self.keepExtras = keepExtras; self.cancellation = cancellation
+        self.quickCheck = quickCheck
         let a = self.source.path, b = self.destination.path
         guard a != b, a != "/", b != "/", !a.hasPrefix(b + "/"), !b.hasPrefix(a + "/") else {
             throw BackupError.message("源目录和目标目录不能相同，也不能相互包含。")
@@ -172,6 +174,37 @@ final class DirectoryCopyEngine {
                 throw BackupError.message("目标父路径不是实际目录，未穿过符号链接写入：\(current.path)")
             }
         }
+    }
+
+    // Compare direct regular files only; every child directory is checked independently.
+    // Bulk URL properties avoid the per-file timestamp and stored-name queries on SMB.
+    private func quickMatch(_ folder: URL, target: URL) throws -> Int? {
+        var parent = destination
+        let relative = String(target.path.dropFirst(destination.path.count)).split(separator: "/")
+        for part in relative {
+            parent.appendPathComponent(String(part))
+            guard let stamp = try? CopyFileStamp.read(parent, includeExtendedMetadata: false), stamp.kind == mode_t(S_IFDIR) else { return nil }
+        }
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        func summary(_ url: URL) throws -> (Int, Int64, Set<String>)? {
+            let children = try fm.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(keys))
+            var count = 0; var bytes: Int64 = 0; var names = Set<String>()
+            for child in children {
+                if cancellation.cancelled { return nil }
+                let info = try child.resourceValues(forKeys: keys)
+                if info.isSymbolicLink == true { return nil }
+                if info.isDirectory == true { continue }
+                guard info.isRegularFile == true, let size = info.fileSize else { return nil }
+                let sum = bytes.addingReportingOverflow(Int64(size))
+                guard !sum.overflow else { return nil }
+                count += 1; bytes = sum.partialValue; names.insert(child.lastPathComponent)
+            }
+            return (count, bytes, names)
+        }
+        guard let a = try summary(folder), let b = try? summary(target), a.0 == b.0, a.1 == b.1 else { return nil }
+        // Before archiving target-only files, a rename must trigger a real copy.
+        if !keepExtras && a.2 != b.2 { return nil }
+        return a.0
     }
 
     private func metadata(from: URL, to: URL, expected: CopyFileStamp, log: (String) -> Void) throws {
@@ -204,8 +237,10 @@ final class DirectoryCopyEngine {
         var directories: [CopyEntry] = []
         var originalPaths = Set<String>()
         var scanError: Error?
+        var quickDirectories: [String: Bool] = [:]
+        var quickSkipped = 0
         state.text = "正在检查源、目标差异…"; emit(true)
-        guard let enumerator = fm.enumerator(at: source, includingPropertiesForKeys: [.isHiddenKey], options: [],
+        guard let enumerator = fm.enumerator(at: source, includingPropertiesForKeys: [.isHiddenKey, .isRegularFileKey, .isSymbolicLinkKey], options: [],
             errorHandler: { _, error in scanError = error; return false }) else {
             throw BackupError.message("无法读取源目录。")
         }
@@ -215,6 +250,23 @@ final class DirectoryCopyEngine {
                 throw BackupError.message("目录枚举路径不在源目录中：\(url.path)，源目录：\(source.path)")
             }
             let relative = String(url.path.dropFirst(source.path.count + 1))
+            if quickCheck {
+                let info = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                if info.isRegularFile == true && info.isSymbolicLink != true {
+                    let folder = url.deletingLastPathComponent()
+                    if quickDirectories[folder.path] == nil {
+                        let folderRelative = String(folder.path.dropFirst(source.path.count))
+                        let target = folderRelative.isEmpty ? destination : destination.appendingPathComponent(String(folderRelative.dropFirst()))
+                        quickDirectories[folder.path] = try quickMatch(folder, target: target) != nil
+                        if quickDirectories[folder.path] == true { log("快速检查通过，跳过目录直属文件：\(folderRelative.isEmpty ? "." : String(folderRelative.dropFirst()))") }
+                    }
+                    if quickDirectories[folder.path] == true {
+                        originalPaths.insert(relative); state.scanned += 1; state.skipped += 1; quickSkipped += 1
+                        state.text = "快速检查：已跳过 \(quickSkipped) 个文件，需更新 \(entries.count) 个文件"; emit()
+                        continue
+                    }
+                }
+            }
             if try skipDirectory(url) { enumerator.skipDescendants(); continue }
             originalPaths.insert(relative)
             let stamp = try CopyFileStamp.read(url, includeExtendedMetadata: false)

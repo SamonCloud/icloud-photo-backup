@@ -178,6 +178,7 @@ func runBackup(root: URL, identity: String?, stop: StopFlag, allowCloud: Bool, a
     var stop = StopFlag()
     private var errorLog: FileHandle?
     var logURL: URL?
+    @Published var previousLogURL = TaskLogHistory.latest(.photo)
     var startBlocker: (() -> String?)?
 
     func choose() {
@@ -216,6 +217,7 @@ func runBackup(root: URL, identity: String?, stop: StopFlag, allowCloud: Bool, a
             let url = logs.appendingPathComponent("\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString).txt")
             FileManager.default.createFile(atPath: url.path, contents: nil)
             errorLog = try FileHandle(forWritingTo: url); logURL = url
+            previousLogURL = TaskLogHistory.latest(.photo, excluding: url)
         } catch { addLog("无法建立本机日志：\(error.localizedDescription)") }
         addLog("开始\(limit == nil ? "完整增量检查" : "前 5 项试运行")；必要时联网获取：\(cloud ? "允许" : "禁止")。")
         Task { [self] in
@@ -249,6 +251,11 @@ func runBackup(root: URL, identity: String?, stop: StopFlag, allowCloud: Bool, a
     func finish() {
         running = false
         try? errorLog?.synchronize(); try? errorLog?.close(); errorLog = nil
+        previousLogURL = TaskLogHistory.latest(.photo)
+    }
+    func openPreviousLog() {
+        previousLogURL = TaskLogHistory.latest(.photo, excluding: running ? logURL : nil)
+        if let url = previousLogURL { NSWorkspace.shared.open(url) }
     }
     func cancel() { stop.stop(); state.text = "正在停止，等待当前文件复制结束…" }
 }
@@ -295,6 +302,8 @@ struct BackupView: View {
                 Button("停止") { model.cancel() }.disabled(!model.running || model.stop.stopped)
                 Button("试运行前 5 项") { model.start(limit: 5) }.disabled(model.running || model.destination.isEmpty)
                 Spacer()
+                Button("打开上次任务日志") { model.openPreviousLog() }
+                    .disabled(model.previousLogURL == nil)
                 Button("查看本次日志") { if let url = model.logURL { NSWorkspace.shared.open(url) } }
                     .disabled(model.logURL == nil)
             }

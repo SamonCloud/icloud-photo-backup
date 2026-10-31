@@ -10,11 +10,15 @@ import SwiftUI
     @Published var keepExtras = UserDefaults.standard.object(forKey: "copyKeepExtras") as? Bool ?? true {
         didSet { UserDefaults.standard.set(keepExtras, forKey: "copyKeepExtras") }
     }
+    @Published var quickCheck = UserDefaults.standard.object(forKey: "copyQuickCheck") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(quickCheck, forKey: "copyQuickCheck") }
+    }
     @Published var running = false
     @Published var progress = DirectoryCopyProgress()
     @Published var messages = ""
     var cancellation = CopyCancellation()
     var logURL: URL?
+    @Published var previousLogURL = TaskLogHistory.latest(.directory)
     var startBlocker: (() -> String?)?
     private var logHandle: FileHandle?
 
@@ -41,6 +45,7 @@ import SwiftUI
         let input = URL(fileURLWithPath: source), output = URL(fileURLWithPath: destination)
         let hidden = includeHidden
         let keep = keepExtras
+        let quick = quickCheck
         messages = ""; progress = DirectoryCopyProgress(); running = true
         do {
             let logs = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -49,10 +54,11 @@ import SwiftUI
             let url = logs.appendingPathComponent(UUID().uuidString + ".txt")
             guard FileManager.default.createFile(atPath: url.path, contents: nil) else { throw BackupError.message("无法创建复制日志。") }
             logHandle = try FileHandle(forWritingTo: url); logURL = url
+            previousLogURL = TaskLogHistory.latest(.directory, excluding: url)
         } catch { addLog("本机日志不可用：\(error.localizedDescription)") }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             do {
-                let engine = try DirectoryCopyEngine(source: input, destination: output, includeHidden: hidden, keepExtras: keep, cancellation: control)
+                let engine = try DirectoryCopyEngine(source: input, destination: output, includeHidden: hidden, keepExtras: keep, quickCheck: quick, cancellation: control)
                 let result = try engine.run(update: { value in DispatchQueue.main.async { self?.progress = value } },
                     log: { line in DispatchQueue.main.async { self?.addLog(line) } })
                 DispatchQueue.main.async {
@@ -68,7 +74,14 @@ import SwiftUI
         }
     }
     func cancel() { cancellation.cancel(); progress.text = "正在停止，保留当前文件供下次续传…" }
-    private func finish() { running = false; try? logHandle?.synchronize(); try? logHandle?.close(); logHandle = nil }
+    private func finish() {
+        running = false; try? logHandle?.synchronize(); try? logHandle?.close(); logHandle = nil
+        previousLogURL = TaskLogHistory.latest(.directory)
+    }
+    func openPreviousLog() {
+        previousLogURL = TaskLogHistory.latest(.directory, excluding: running ? logURL : nil)
+        if let url = previousLogURL { NSWorkspace.shared.open(url) }
+    }
 }
 
 @MainActor final class NavigationModel: ObservableObject { @Published var tab = 0 }
@@ -110,6 +123,9 @@ struct DirectoryCopyView: View {
                 }.padding(10)
             }
             Toggle("包含隐藏目录", isOn: $model.includeHidden).disabled(model.running)
+            Toggle("快速检查", isOn: $model.quickCheck).disabled(model.running)
+            Text("按每个目录直属文件的数量和总大小跳过检查，子目录分别检查。关闭后逐项比较名称、大小和秒级时间。")
+                .font(.caption).foregroundColor(.secondary)
             Toggle("保留目标独有的文件", isOn: $model.keepExtras).disabled(model.running)
             if !model.keepExtras {
                 Text("不保留时，完整复制成功后将目标独有内容移入 .directory-copy-archive，保留按批次恢复的副本。")
@@ -138,6 +154,7 @@ struct DirectoryCopyView: View {
                     .buttonStyle(.borderedProminent).disabled(model.running || model.source.isEmpty || model.destination.isEmpty)
                 Button("停止") { model.cancel() }.disabled(!model.running || model.cancellation.cancelled)
                 Spacer()
+                Button("打开上次任务日志") { model.openPreviousLog() }.disabled(model.previousLogURL == nil)
                 Button("查看日志") { if let url = model.logURL { NSWorkspace.shared.open(url) } }.disabled(model.logURL == nil)
             }
             ScrollView {

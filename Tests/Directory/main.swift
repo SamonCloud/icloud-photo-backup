@@ -19,8 +19,8 @@ func write(_ root: URL, _ path: String, _ value: String) throws {
     try Data(value.utf8).write(to: file)
 }
 func copy(_ source: URL, _ dest: URL, hidden: Bool = false, keep: Bool = true,
-          control: CopyCancellation = CopyCancellation(), update: (DirectoryCopyProgress) -> Void = { _ in }) throws -> DirectoryCopyProgress {
-    let engine = try DirectoryCopyEngine(source: source, destination: dest, includeHidden: hidden, keepExtras: keep, cancellation: control)
+          control: CopyCancellation = CopyCancellation(), quick: Bool = false, update: (DirectoryCopyProgress) -> Void = { _ in }) throws -> DirectoryCopyProgress {
+    let engine = try DirectoryCopyEngine(source: source, destination: dest, includeHidden: hidden, keepExtras: keep, quickCheck: quick, cancellation: control)
     return try engine.run(update: update, log: { print("LOG", $0) })
 }
 let source = try folder("source"), dest = try folder("destination")
@@ -65,7 +65,7 @@ let stop = CopyCancellation()
 let partial = try copy(resumeSource, resumeDest, control: stop, update: { state in if state.bytes > 0 { stop.cancel() } })
 try expect(partial.bytes > 0 && partial.bytes < Int64(large.count), "Stop must interrupt inside a large file")
 try expect(!fm.fileExists(atPath: resumeDest.appendingPathComponent("large.bin").path), "Incomplete file must not become the final target")
-let resumed = try copy(resumeSource, resumeDest)
+let resumed = try copy(resumeSource, resumeDest, quick: true)
 try expect(resumed.failed == 0 && resumed.resumedBytes == partial.bytes, "Restart must reuse validated bytes instead of starting over")
 try expect(try Data(contentsOf: resumeDest.appendingPathComponent("large.bin")) == large, "Resumed data must be exact")
 try fm.removeItem(at: resumeDest.appendingPathComponent("large.bin"))
@@ -145,4 +145,42 @@ try expect(setattrlist(sameFile.path, &attrs, &times, MemoryLayout<TestTimes>.si
 let relaxed = try copy(relaxedSource, relaxedDest)
 try expect(relaxed.failed == 0 && relaxed.copied == 0 && relaxed.skipped == 1, "Different optional attributes and nanoseconds must skip the actual file without recopying")
 try expect(try fileHash(relaxedSource.appendingPathComponent("same.txt")) == fileHash(sameFile), "Skipping optional attribute differences must preserve content")
+func quickCopy(_ input: URL, _ output: URL, keep: Bool = true, enabled: Bool = true,
+               control: CopyCancellation = CopyCancellation()) throws -> DirectoryCopyProgress {
+    try DirectoryCopyEngine(source: input, destination: output, includeHidden: false, keepExtras: keep,
+        quickCheck: enabled, cancellation: control).run(update: { _ in }, log: { _ in })
+}
+let fastSource = try folder("fast-source"), fastDest = try folder("fast-destination")
+try write(fastSource, "same.txt", "AAAA")
+try write(fastDest, "same.txt", "BBBB")
+try fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1000)], ofItemAtPath: fastDest.appendingPathComponent("same.txt").path)
+let fast = try quickCopy(fastSource, fastDest)
+try expect(fast.copied == 0 && fast.skipped == 1 && fast.failed == 0, "Equal counts and total sizes must bypass timestamps")
+try expect(try String(contentsOf: fastDest.appendingPathComponent("same.txt"), encoding: .utf8) == "BBBB", "Quick mode deliberately skips same-size content changes")
+let full = try quickCopy(fastSource, fastDest, enabled: false)
+try expect(full.copied == 1 && full.failed == 0, "Disabling quick mode must restore timestamp comparison")
+try write(fastSource, "child/new.txt", "new child")
+let childCopy = try quickCopy(fastSource, fastDest)
+try expect(childCopy.copied == 1 && childCopy.failed == 0, "Matching parent files must not hide missing child directories")
+try write(fastSource, "child/new.txt", "changed length")
+let sizeChange = try quickCopy(fastSource, fastDest)
+try expect(sizeChange.copied == 1 && sizeChange.failed == 0, "Changed total size must trigger original checks")
+try write(fastSource, "child/empty.txt", "")
+let countChange = try quickCopy(fastSource, fastDest)
+try expect(countChange.copied == 1 && countChange.failed == 0, "Changed count with unchanged total bytes must trigger original checks")
+let renameSource = try folder("fast-rename-source"), renameDest = try folder("fast-rename-dest")
+try write(renameSource, "new.txt", "same")
+try write(renameDest, "old.txt", "same")
+let renamedResult = try quickCopy(renameSource, renameDest, keep: false)
+try expect(renamedResult.copied == 1 && renamedResult.archivedExtras == 1 && renamedResult.failed == 0, "Archival must not remove old name before copying renamed equal-size file")
+let linkSource = try folder("fast-link-source"), linkDest = try folder("fast-link-dest")
+try write(linkSource, "nested/file.txt", "abc")
+try fm.createSymbolicLink(atPath: linkDest.appendingPathComponent("nested").path, withDestinationPath: fastSource.path)
+do { _ = try quickCopy(linkSource, linkDest); fatalError("Quick mode must reject destination parent links") }
+catch { checks += 1 }
+let stopped = CopyCancellation(); stopped.cancel()
+let interrupted = try quickCopy(fastSource, fastDest, control: stopped)
+try expect(interrupted.copied == 0, "Cancelled quick scans must not start copying")
+let restarted = try quickCopy(fastSource, fastDest)
+try expect(restarted.copied == 0 && restarted.failed == 0, "Restarted scans must skip already copied groups")
 print("PASS: \(checks) directory-copy checks; metadata, xattrs, symlinks, diff, hidden directories, extras archive, large-file resume and failure safety.")
