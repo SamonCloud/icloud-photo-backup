@@ -178,6 +178,7 @@ func runBackup(root: URL, identity: String?, stop: StopFlag, allowCloud: Bool, a
     var stop = StopFlag()
     private var errorLog: FileHandle?
     var logURL: URL?
+    var startBlocker: (() -> String?)?
 
     func choose() {
         let panel = NSOpenPanel()
@@ -200,6 +201,7 @@ func runBackup(root: URL, identity: String?, stop: StopFlag, allowCloud: Bool, a
 
     func start(limit: Int? = nil) {
         guard !running, !destination.isEmpty else { return }
+        if let reason = startBlocker?() { state.text = reason; addLog(reason); return }
         running = true; stop = StopFlag(); messages = ""
         state = ProgressState(text: "正在检查照片访问权限…")
         let root = URL(fileURLWithPath: destination, isDirectory: true)
@@ -315,9 +317,12 @@ struct BackupView: View {
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     let model = BackupModel()
+    let copyModel = CopyModel()
+    let navigation = NavigationModel()
     var window: NSWindow!
     private var statusItem: NSStatusItem!
     private var statusSubscription: AnyCancellable?
+    private var copySubscription: AnyCancellable?
     private var statusLine: NSMenuItem!
     private var countsLine: NSMenuItem!
     private var startItem: NSMenuItem!
@@ -354,10 +359,24 @@ struct BackupView: View {
         menu.addItem(startItem); menu.addItem(stopItem)
         menu.addItem(menuItem("打开目标目录", #selector(showDestination)))
         menu.addItem(.separator())
+        menu.addItem(menuItem("打开目录复制", #selector(showCopy)))
+        menu.addItem(menuItem("开始 / 继续目录复制", #selector(startCopy)))
+        menu.addItem(menuItem("停止目录复制", #selector(stopCopy)))
+        menu.addItem(.separator())
         menu.addItem(menuItem("退出照片增量备份…", #selector(quitApp)))
         statusItem.menu = menu
         statusSubscription = model.$state.combineLatest(model.$running).sink { [weak self] state, running in
             self?.refreshStatus(state, running: running)
+        }
+        copySubscription = copyModel.$progress.combineLatest(copyModel.$running).sink { [weak self] progress, running in
+            guard let self, !self.model.running else { return }
+            if running {
+                let percent = progress.totalBytes > 0 ? Int(Double(progress.bytes) / Double(progress.totalBytes) * 100) : 0
+                self.statusItem.button?.title = progress.scanning ? " 检查" : " \(percent)%"
+                self.statusItem.button?.toolTip = "目录复制：\(progress.text)"
+                self.statusLine.title = String(progress.text.prefix(70))
+                self.countsLine.title = "已复制 \(progress.copied) · 跳过 \(progress.skipped) · 失败 \(progress.failed)"
+            } else { self.refreshStatus(self.model.state, running: false) }
         }
     }
 
@@ -371,7 +390,12 @@ struct BackupView: View {
         stopItem.isEnabled = running && !model.stop.stopped
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) { refreshStatus(model.state, running: model.running) }
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if !copyModel.running || model.running { refreshStatus(model.state, running: model.running) }
+    }
+    @objc func showCopy() { navigation.tab = 1; showWindow() }
+    @objc func startCopy() { showCopy(); copyModel.start() }
+    @objc func stopCopy() { copyModel.cancel() }
     @objc func showWindow() {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -385,6 +409,25 @@ struct BackupView: View {
     @objc func quitApp() { NSApp.terminate(nil) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = icon
+        }
+        func overlaps(_ first: String, _ second: String) -> Bool {
+            guard !first.isEmpty, !second.isEmpty else { return false }
+            let a = URL(fileURLWithPath: first).resolvingSymlinksInPath().path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let b = URL(fileURLWithPath: second).resolvingSymlinksInPath().path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return a == b || a.hasPrefix(b + "/") || b.hasPrefix(a + "/")
+        }
+        copyModel.startBlocker = { [weak self] in
+            guard let self else { return nil }
+            return self.model.running && (overlaps(self.copyModel.source, self.model.destination) || overlaps(self.copyModel.destination, self.model.destination))
+                ? "照片备份正在使用这个目录，请等其停止后再执行目录复制。" : nil
+        }
+        model.startBlocker = { [weak self] in
+            guard let self else { return nil }
+            return self.copyModel.running && (overlaps(self.copyModel.source, self.model.destination) || overlaps(self.copyModel.destination, self.model.destination))
+                ? "目录复制正在使用这个备份位置，请等其停止后再执行照片备份。" : nil
+        }
         let menu = NSMenu()
         let item = NSMenuItem(); menu.addItem(item)
         let appMenu = NSMenu(); item.submenu = appMenu
@@ -394,15 +437,54 @@ struct BackupView: View {
         edit.addItem(withTitle: "复制", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         NSApp.mainMenu = menu
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 650),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 830),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "照片增量备份"
+        window.contentMinSize = NSSize(width: 920, height: 790)
         window.isReleasedWhenClosed = false
         window.delegate = self
-        window.contentView = NSHostingView(rootView: BackupView(model: model))
+        window.contentView = NSHostingView(rootView: ApplicationTabs(navigation: navigation, photo: model, copy: copyModel))
         installStatusItem()
         window.center(); showWindow()
-        if model.automatic && !model.destination.isEmpty { model.start() }
+        if let index = CommandLine.arguments.firstIndex(of: "--ui-smoke-test"), CommandLine.arguments.count > index + 1 {
+            guard NSRunningApplication.current.activationPolicy == .regular,
+                  Bundle.main.url(forResource: "AppIcon", withExtension: "icns") != nil else {
+                fputs("UI smoke failed: Dock policy or bundled icon is missing.\n", stderr)
+                exit(1)
+            }
+            print("PASS: regular activation policy and bundled Dock icon.")
+            let output = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+            model.destination = "/Volumes/NAS/照片备份"
+            copyModel.source = "/源目录示例"; copyModel.destination = "/Volumes/NAS/目标目录示例"
+            navigation.tab = 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                self.savePreview(to: output.appendingPathComponent("directory-tab.png"))
+                self.navigation.tab = 0
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.savePreview(to: output.appendingPathComponent("photo-tab.png"))
+                    NSApp.terminate(nil)
+                }
+            }
+        } else if model.automatic && !model.destination.isEmpty { model.start() }
+    }
+    private func savePreview(to url: URL) {
+        guard let view = window.contentView else { return }
+        view.layoutSubtreeIfNeeded()
+        guard let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: image)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let canvas = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: image.pixelsWide, pixelsHigh: image.pixelsHigh,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: canvas)
+            NSColor.white.setFill()
+            let bounds = NSRect(x: 0, y: 0, width: image.pixelsWide, height: image.pixelsHigh)
+            bounds.fill(); image.draw(in: bounds)
+            NSGraphicsContext.restoreGraphicsState()
+            try canvas.representation(using: .png, properties: [:])?.write(to: url)
+        } catch { fputs("UI preview failed: \(error)\n", stderr) }
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
@@ -414,9 +496,10 @@ struct BackupView: View {
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if model.running {
+        if model.running || copyModel.running {
             window.makeKeyAndOrderFront(nil)
-            model.cancel()
+            if model.running { model.cancel() }
+            if copyModel.running { copyModel.cancel() }
             model.addLog("请等待当前文件结束，再退出应用。已完成的资源已记录，下次会继续。")
             return .terminateCancel
         }
@@ -428,7 +511,7 @@ struct BackupView: View {
     @MainActor static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
-        app.setActivationPolicy(.accessory)
+        app.setActivationPolicy(.regular)
         app.delegate = delegate
         withExtendedLifetime(delegate) { app.run() }
     }

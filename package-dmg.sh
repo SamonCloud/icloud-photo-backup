@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
-RELEASE_ROOT="$PWD/.build/dmg-stage"
+mkdir -p "$PWD/.build"
+RELEASE_ROOT="$(mktemp -d "$PWD/.build/dmg-stage.XXXXXX")"
 APP="$RELEASE_ROOT/照片增量备份.app"
 mkdir -p "$RELEASE_ROOT" "$PWD/Resources" "$PWD/.build/module-cache" "$PWD/dist"
 if [ -e "$APP" ]; then

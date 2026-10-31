@@ -5,3 +5,7 @@ mkdir -p .build/module-cache
 xcrun swiftc -swift-version 5 -module-cache-path "$PWD/.build/module-cache" \
   Sources/Archive.swift Sources/Layout.swift Sources/ExportPolicy.swift Tests/main.swift -framework CryptoKit -o .build/archive-tests
 .build/archive-tests
+xcrun swiftc -swift-version 5 -module-cache-path "$PWD/.build/module-cache" \
+  Sources/Archive.swift Sources/Layout.swift Sources/DirectoryCopy.swift Tests/Directory/main.swift \
+  -framework CryptoKit -o .build/directory-tests
+.build/directory-tests
