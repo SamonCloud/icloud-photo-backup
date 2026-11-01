@@ -12,8 +12,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>照片增量备份</string>
 <key>CFBundleExecutable</key><string>PhotoBackup</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.4.1</string>
-<key>CFBundleVersion</key><string>14</string>
+<key>CFBundleShortVersionString</key><string>1.4.2</string>
+<key>CFBundleVersion</key><string>15</string>
 <key>LSUIElement</key><false/>
 <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>

@@ -150,7 +150,7 @@ struct CameraImportView: View {
             }
             Text("支持 yyyy、mm、dd，例如 yyyymmdd、yyyy-mm-dd_旅行。优先使用照片／RAW 拍摄日期和带明确时区的视频创建信息；无法可靠读取时使用文件修改日期。").font(.footnote).foregroundStyle(.secondary)
             Toggle("只导入新文件", isOn: $model.onlyNew).disabled(model.running)
-            Text("自动记录最近成功文件及逐文件导入记录。已导入且目标仍存在的文件会跳过；成功导入过的日期目录被整体删除后，会记住并排除该日期。关闭开关可重新导入。失败或手动跳过的日期仍可重试。相同时间的 JPG 和 RAW 分别记录。").font(.footnote).foregroundStyle(.secondary)
+            Text("自动记录最近成功文件及逐文件导入记录。已导入且目标仍存在的文件会跳过；成功导入过的日期目录被整体删除后，会记住并跳过旧文件，同一天新拍的文件仍会导入。关闭开关可重新导入。失败或手动跳过的日期仍可重试。相同时间的 JPG 和 RAW 分别记录。").font(.footnote).foregroundStyle(.secondary)
             GroupBox("导入进度") {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(model.progress.text).textSelection(.enabled)

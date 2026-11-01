@@ -178,7 +178,7 @@ final class CameraImportEngine {
                 }
             }
             try JSONEncoder().encode(excludedDates).write(to: excludedURL, options: .atomic)
-            if !excludedDates.isEmpty { log("已记住 \(excludedDates.count) 个删除过导入目录的日期，本次不再导入这些日期。") }
+            if !excludedDates.isEmpty { log("已记住 \(excludedDates.count) 个删除过导入目录的日期，本次跳过这些日期中已成功导入过的旧文件，新拍摄文件仍会导入。") }
         }
         let lastURL = meta.appendingPathComponent("last-import.json")
         var latest = (try? Data(contentsOf: lastURL)).flatMap { try? JSONDecoder().decode(CameraReceipt.self, from: $0) }
@@ -203,9 +203,9 @@ final class CameraImportEngine {
                     let stamp = try CopyFileStamp.read(url, includeExtendedMetadata: false)
                     guard stamp.kind == mode_t(S_IFREG) else { return }
                     let date = try dateReader(url)
-                    if onlyNew && excludedDates.contains(dayRule.name(date)) { state.skipped += 1; return }
                     let relative = String(url.path.dropFirst(source.path.count + 1))
                     let key = digest("\(relative)\n\(stamp.size)\n\(stamp.modified).\(stamp.modifiedNano)\n\(date.timeIntervalSince1970)")
+                    if onlyNew && excludedDates.contains(dayRule.name(date)) && receipts[key] != nil { state.skipped += 1; return }
                     if onlyNew, let record = receipts[key], !record.relative.hasPrefix("/"), !record.relative.split(separator: "/").contains("..") {
                         // Validate ancestors without creating them or following a link.
                         var current = destination; var safe = true
