@@ -225,4 +225,17 @@ try expect(TaskLogHistory.latest(in: logFolder)?.lastPathComponent == "newest.tx
 try fm.removeItem(at: newestLog)
 try expect(TaskLogHistory.latest(in: logFolder)?.lastPathComponent == "older.txt", "History must rescan after restart or removal")
 try expect(TaskLogHistory.directory(.photo) != TaskLogHistory.directory(.directory), "Tabs must have independent log histories")
+let statusURL = root.appendingPathComponent("state/last-copy-task.json")
+let interruptedRecord = TaskRunRecord(status: .running, text: "正在复制测试文件", logPath: olderLog.path, updatedAt: Date())
+try interruptedRecord.save(to: statusURL)
+try expect(TaskRunRecord.load(from: statusURL)?.restoredMessage.contains("异常中断") == true, "Running records must show interruption on reopen")
+for status in [TaskRunRecord.Status.completed, .stopped, .failed] {
+    let record = TaskRunRecord(status: status, text: "测试结果", logPath: nil, updatedAt: Date())
+    try record.save(to: statusURL)
+    let restored = TaskRunRecord.load(from: statusURL)
+    try expect(restored?.status == status && restored?.restoredMessage.contains("异常中断") == false, "Finished state must survive restart without false interruption")
+}
+try Data("invalid".utf8).write(to: statusURL)
+try expect(TaskRunRecord.load(from: statusURL) == nil, "Corrupt status must fall back safely to history")
+try expect(TaskLogHistory.tail(of: olderLog) == "test log", "Legacy logs must remain readable on upgrade")
 print("PASS: \(checks) assertions; backup safety, recovery and task log history.")

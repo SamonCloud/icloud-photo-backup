@@ -372,6 +372,7 @@ struct BackupView: View {
         menu.addItem(menuItem("开始 / 继续目录复制", #selector(startCopy)))
         menu.addItem(menuItem("停止目录复制", #selector(stopCopy)))
         menu.addItem(.separator())
+        menu.addItem(menuItem("关于照片增量备份", #selector(showAbout)))
         menu.addItem(menuItem("退出照片增量备份…", #selector(quitApp)))
         statusItem.menu = menu
         statusSubscription = model.$state.combineLatest(model.$running).sink { [weak self] state, running in
@@ -416,6 +417,14 @@ struct BackupView: View {
         NSWorkspace.shared.open(URL(fileURLWithPath: model.destination))
     }
     @objc func quitApp() { NSApp.terminate(nil) }
+    @objc func showAbout() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "照片增量备份",
+            .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知",
+            .version: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
+        ])
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
@@ -440,6 +449,8 @@ struct BackupView: View {
         let menu = NSMenu()
         let item = NSMenuItem(); menu.addItem(item)
         let appMenu = NSMenu(); item.submenu = appMenu
+        appMenu.addItem(menuItem("关于照片增量备份", #selector(showAbout)))
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出照片增量备份", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let editItem = NSMenuItem(); menu.addItem(editItem)
         let edit = NSMenu(title: "编辑"); editItem.submenu = edit
@@ -508,7 +519,10 @@ struct BackupView: View {
         if model.running || copyModel.running {
             window.makeKeyAndOrderFront(nil)
             if model.running { model.cancel() }
-            if copyModel.running { copyModel.cancel() }
+            if copyModel.running {
+                copyModel.addLog("收到退出请求，先停止复制；等待当前文件结束后再次退出。")
+                copyModel.cancel()
+            }
             model.addLog("请等待当前文件结束，再退出应用。已完成的资源已记录，下次会继续。")
             return .terminateCancel
         }

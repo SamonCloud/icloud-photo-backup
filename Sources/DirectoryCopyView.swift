@@ -21,6 +21,33 @@ import SwiftUI
     @Published var previousLogURL = TaskLogHistory.latest(.directory)
     var startBlocker: (() -> String?)?
     private var logHandle: FileHandle?
+    private var lastSaved = Date.distantPast
+
+    init() {
+        if let record = TaskRunRecord.load(from: TaskRunRecord.copyURL) {
+            progress.text = record.restoredMessage
+            messages = record.restoredMessage
+        } else if let log = previousLogURL, let tail = TaskLogHistory.tail(of: log) {
+            let lastLine = tail.split(separator: "\n").last.map(String.init) ?? "日志为空。"
+            let complete = lastLine.contains("目录复制完成。")
+            let message = complete ? "上次目录复制已记录完成。\n\(lastLine)" : "上次任务未记录成功完成，请打开上次任务日志核实；可继续增量复制。\n最后日志：\(lastLine)"
+            progress.text = message; messages = message
+        }
+    }
+
+    private func persist(_ status: TaskRunRecord.Status) {
+        lastSaved = Date()
+        let summary = "\(progress.text) 已复制 \(progress.copied)，跳过 \(progress.skipped)，失败 \(progress.failed)，数据 \(progress.bytes) 字节，目标独有项归档 \(progress.archivedExtras)。"
+        do {
+            try TaskRunRecord(status: status, text: summary, logPath: logURL?.path, updatedAt: lastSaved).save(to: TaskRunRecord.copyURL)
+            try logHandle?.synchronize()
+        } catch { addLog("保存任务状态失败：\(error.localizedDescription)") }
+    }
+
+    private func acceptProgress(_ value: DirectoryCopyProgress) {
+        progress = value
+        if Date().timeIntervalSince(lastSaved) >= 5 { persist(.running) }
+    }
 
     func choose(source choosingSource: Bool) {
         let panel = NSOpenPanel()
@@ -47,6 +74,7 @@ import SwiftUI
         let keep = keepExtras
         let quick = quickCheck
         messages = ""; progress = DirectoryCopyProgress(); running = true
+        progress.text = "正在检查源、目标差异…"; logURL = nil
         do {
             let logs = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("PhotoIncrementalBackup/CopyLogs", isDirectory: true)
@@ -56,25 +84,28 @@ import SwiftUI
             logHandle = try FileHandle(forWritingTo: url); logURL = url
             previousLogURL = TaskLogHistory.latest(.directory, excluding: url)
         } catch { addLog("本机日志不可用：\(error.localizedDescription)") }
+        addLog("开始目录复制；快速检查：\(quick ? "开启" : "关闭")。")
+        persist(.running)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             do {
                 let engine = try DirectoryCopyEngine(source: input, destination: output, includeHidden: hidden, keepExtras: keep, quickCheck: quick, cancellation: control)
-                let result = try engine.run(update: { value in DispatchQueue.main.async { self?.progress = value } },
+                let result = try engine.run(update: { value in DispatchQueue.main.async { self?.acceptProgress(value) } },
                     log: { line in DispatchQueue.main.async { self?.addLog(line) } })
                 DispatchQueue.main.async {
                     self?.addLog("\(result.text) 已复制 \(result.copied)，跳过 \(result.skipped)，失败 \(result.failed)，目标独有项归档 \(result.archivedExtras)。")
-                    self?.finish()
+                    self?.finish(control.cancelled ? .stopped : (result.failed == 0 ? .completed : .failed))
                 }
             } catch {
                 DispatchQueue.main.async {
                     self?.progress.text = "任务未完成：\(error.localizedDescription)"
-                    self?.addLog(error.localizedDescription); self?.finish()
+                    self?.addLog(error.localizedDescription); self?.finish(.failed)
                 }
             }
         }
     }
     func cancel() { cancellation.cancel(); progress.text = "正在停止，保留当前文件供下次续传…" }
-    private func finish() {
+    private func finish(_ status: TaskRunRecord.Status) {
+        persist(status)
         running = false; try? logHandle?.synchronize(); try? logHandle?.close(); logHandle = nil
         previousLogURL = TaskLogHistory.latest(.directory)
     }

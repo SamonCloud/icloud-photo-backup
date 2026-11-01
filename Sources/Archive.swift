@@ -15,7 +15,11 @@ func fileHash(_ url: URL) throws -> String {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
     var hash = SHA256()
-    while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty { hash.update(data: data) }
+    while try autoreleasepool(invoking: {
+        guard let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty else { return false }
+        hash.update(data: data)
+        return true
+    }) {}
     return hash.finalize().map { String(format: "%02x", $0) }.joined()
 }
 

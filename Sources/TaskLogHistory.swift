@@ -1,5 +1,29 @@
 import Foundation
 
+struct TaskRunRecord: Codable {
+    enum Status: String, Codable { case running, completed, stopped, failed }
+    let status: Status
+    let text: String
+    let logPath: String?
+    let updatedAt: Date
+
+    static var copyURL: URL {
+        TaskLogHistory.directory(.directory).deletingLastPathComponent().appendingPathComponent("last-copy-task.json")
+    }
+    func save(to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(self).write(to: url, options: .atomic)
+    }
+    static func load(from url: URL) -> TaskRunRecord? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(Self.self, from: data)
+    }
+    var restoredMessage: String {
+        let heading = status == .running ? "上次目录复制异常中断，未记录完成；可点击“开始 / 继续复制”恢复。" : "上次目录复制结果："
+        return "\(heading)\n最后记录：\(updatedAt.formatted())\n\(text)"
+    }
+}
+
 enum TaskLogHistory {
     enum Kind { case photo, directory }
 
@@ -10,6 +34,16 @@ enum TaskLogHistory {
 
     static func latest(_ kind: Kind, excluding current: URL? = nil) -> URL? {
         latest(in: directory(kind), excluding: current)
+    }
+
+    static func tail(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        do {
+            let end = try handle.seekToEnd()
+            try handle.seek(toOffset: end > 16384 ? end - 16384 : 0)
+            return String(decoding: try handle.readToEnd() ?? Data(), as: UTF8.self)
+        } catch { return nil }
     }
 
     static func latest(in directory: URL, excluding current: URL? = nil) -> URL? {

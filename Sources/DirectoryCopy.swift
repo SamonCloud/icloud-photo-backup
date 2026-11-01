@@ -227,6 +227,8 @@ final class DirectoryCopyEngine {
     }
 
     func run(update: (DirectoryCopyProgress) -> Void, log: (String) -> Void) throws -> DirectoryCopyProgress {
+        let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "正在检查和复制目录")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
         var state = DirectoryCopyProgress()
         var lastUpdate = Date.distantPast
         func emit(_ force: Bool = false) {
@@ -246,6 +248,7 @@ final class DirectoryCopyEngine {
         }
         for case let url as URL in enumerator {
             if cancellation.cancelled { state.text = "已停止差异检查。"; emit(true); return state }
+            try autoreleasepool {
             guard url.path.hasPrefix(source.path + "/") else {
                 throw BackupError.message("目录枚举路径不在源目录中：\(url.path)，源目录：\(source.path)")
             }
@@ -263,11 +266,11 @@ final class DirectoryCopyEngine {
                     if quickDirectories[folder.path] == true {
                         originalPaths.insert(relative); state.scanned += 1; state.skipped += 1; quickSkipped += 1
                         state.text = "快速检查：已跳过 \(quickSkipped) 个文件，需更新 \(entries.count) 个文件"; emit()
-                        continue
+                        return
                     }
                 }
             }
-            if try skipDirectory(url) { enumerator.skipDescendants(); continue }
+            if try skipDirectory(url) { enumerator.skipDescendants(); return }
             originalPaths.insert(relative)
             let stamp = try CopyFileStamp.read(url, includeExtendedMetadata: false)
             let entry = CopyEntry(relative: relative, stamp: stamp)
@@ -291,6 +294,7 @@ final class DirectoryCopyEngine {
             }
             state.text = "正在检查差异：已检查 \(state.scanned) 项，需更新 \(entries.count) 个文件"
             emit()
+            }
         }
         if let error = scanError { throw error }
         state.scanning = false; state.total = entries.count
@@ -322,10 +326,9 @@ final class DirectoryCopyEngine {
                 }
             } else { try fm.createDirectory(at: target, withIntermediateDirectories: false) }
         }
-        let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "正在复制目录")
-        defer { ProcessInfo.processInfo.endActivity(activity) }
         for entry in entries {
             if cancellation.cancelled { break }
+            autoreleasepool {
             let input = source.appendingPathComponent(entry.relative)
             let output = destination.appendingPathComponent(entry.relative)
             let name = digest(entry.relative)
@@ -368,31 +371,37 @@ final class DirectoryCopyEngine {
                         while checked < offset {
                             if cancellation.cancelled { break }
                             let amount = Int(min(8 * 1024 * 1024, offset - checked))
-                            let a = try reader.read(upToCount: amount) ?? Data()
-                            let b = try previous.read(upToCount: amount) ?? Data()
-                            if a.count != amount || a != b {
+                            let matches = try autoreleasepool {
+                                let a = try reader.read(upToCount: amount) ?? Data()
+                                let b = try previous.read(upToCount: amount) ?? Data()
+                                return a.count == amount && a == b
+                            }
+                            if !matches {
                                 try writer.truncate(atOffset: 0); offset = 0
                                 log("\(entry.relative)：未完成片段校验不符，仅重新复制此文件，其他已完成文件保留。")
                                 break
                             }
                             checked += Int64(amount)
                         }
-                        if cancellation.cancelled { break }
+                        if cancellation.cancelled { return }
                         state.resumedBytes += offset; state.bytes += offset
                     }
                     try reader.seek(toOffset: UInt64(offset)); try writer.seek(toOffset: UInt64(offset))
                     var sinceSync: Int64 = 0
                     while offset < entry.stamp.size && !cancellation.cancelled {
                         let amount = Int(min(8 * 1024 * 1024, entry.stamp.size - offset))
-                        let data = try reader.read(upToCount: amount) ?? Data()
-                        guard !data.isEmpty else { throw BackupError.message("源文件读取提前结束：\(entry.relative)") }
-                        try writer.write(contentsOf: data)
-                        offset += Int64(data.count); sinceSync += Int64(data.count); state.bytes += Int64(data.count)
+                        let count = try autoreleasepool {
+                            let data = try reader.read(upToCount: amount) ?? Data()
+                            guard !data.isEmpty else { throw BackupError.message("源文件读取提前结束：\(entry.relative)") }
+                            try writer.write(contentsOf: data)
+                            return Int64(data.count)
+                        }
+                        offset += count; sinceSync += count; state.bytes += count
                         if sinceSync >= 32 * 1024 * 1024 { try writer.synchronize(); sinceSync = 0 }
-                        state.elapsed = Date().timeIntervalSince(start); emit(offset == Int64(data.count))
+                        state.elapsed = Date().timeIntervalSince(start); emit(offset == count)
                     }
                     try writer.synchronize()
-                    if cancellation.cancelled { break }
+                    if cancellation.cancelled { return }
                     guard try CopyFileStamp.read(input, includeExtendedMetadata: false).sameSourceVersion(entry.stamp) else {
                         throw BackupError.message("复制期间源文件发生变化，未替换目标：\(entry.relative)")
                     }
@@ -419,6 +428,7 @@ final class DirectoryCopyEngine {
                 state.failed += 1; log("\(entry.relative)：\(error.localizedDescription)")
             }
             state.done += 1; state.elapsed = Date().timeIntervalSince(start); emit(true)
+            }
         }
         if !cancellation.cancelled {
             func applyDirectoryMetadata() {
