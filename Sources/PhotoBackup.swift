@@ -327,11 +327,13 @@ struct BackupView: View {
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     let model = BackupModel()
     let copyModel = CopyModel()
+    let cameraModel = CameraImportModel()
     let navigation = NavigationModel()
     var window: NSWindow!
     private var statusItem: NSStatusItem!
     private var statusSubscription: AnyCancellable?
     private var copySubscription: AnyCancellable?
+    private var cameraSubscription: AnyCancellable?
     private var statusLine: NSMenuItem!
     private var countsLine: NSMenuItem!
     private var startItem: NSMenuItem!
@@ -372,6 +374,8 @@ struct BackupView: View {
         menu.addItem(menuItem("开始 / 继续目录复制", #selector(startCopy)))
         menu.addItem(menuItem("停止目录复制", #selector(stopCopy)))
         menu.addItem(.separator())
+        menu.addItem(menuItem("打开相机导入", #selector(showCamera)))
+        menu.addItem(.separator())
         menu.addItem(menuItem("关于照片增量备份", #selector(showAbout)))
         menu.addItem(menuItem("退出照片增量备份…", #selector(quitApp)))
         statusItem.menu = menu
@@ -388,6 +392,19 @@ struct BackupView: View {
                 self.countsLine.title = "已复制 \(progress.copied) · 跳过 \(progress.skipped) · 失败 \(progress.failed)"
             } else { self.refreshStatus(self.model.state, running: false) }
         }
+        cameraSubscription = cameraModel.$progress.combineLatest(cameraModel.$running).sink { [weak self] progress, running in
+            guard let self else { return }
+            if running { self.refreshCameraStatus(progress) }
+            else if !self.model.running && !self.copyModel.running { self.refreshStatus(self.model.state, running: false) }
+        }
+    }
+
+    private func refreshCameraStatus(_ progress: DirectoryCopyProgress) {
+        let percent = progress.totalBytes > 0 ? min(100, Int(Double(progress.bytes) / Double(progress.totalBytes) * 100)) : 0
+        statusItem.button?.title = progress.scanning ? " 导入检查" : " 导入 \(percent)%"
+        statusItem.button?.toolTip = "相机导入：\(progress.text)"
+        statusLine.title = String(progress.text.prefix(70))
+        countsLine.title = "导入 \(progress.copied) · 跳过 \(progress.skipped) · 失败 \(progress.failed)"
     }
 
     private func refreshStatus(_ state: ProgressState, running: Bool) {
@@ -401,8 +418,10 @@ struct BackupView: View {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if cameraModel.running { refreshCameraStatus(cameraModel.progress); return }
         if !copyModel.running || model.running { refreshStatus(model.state, running: model.running) }
     }
+    @objc func showCamera() { navigation.tab = 2; showWindow() }
     @objc func showCopy() { navigation.tab = 1; showWindow() }
     @objc func startCopy() { showCopy(); copyModel.start() }
     @objc func stopCopy() { copyModel.cancel() }
@@ -436,13 +455,19 @@ struct BackupView: View {
             let b = URL(fileURLWithPath: second).resolvingSymlinksInPath().path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             return a == b || a.hasPrefix(b + "/") || b.hasPrefix(a + "/")
         }
+        cameraModel.startBlocker = { [weak self] in
+            guard let self else { return nil }
+            return self.model.running || self.copyModel.running ? "请先停止其他备份或复制任务，再开始相机导入。" : nil
+        }
         copyModel.startBlocker = { [weak self] in
             guard let self else { return nil }
+            if self.cameraModel.running { return "相机正在导入，请等待其结束或停止。" }
             return self.model.running && (overlaps(self.copyModel.source, self.model.destination) || overlaps(self.copyModel.destination, self.model.destination))
                 ? "照片备份正在使用这个目录，请等其停止后再执行目录复制。" : nil
         }
         model.startBlocker = { [weak self] in
             guard let self else { return nil }
+            if self.cameraModel.running { return "相机正在导入，请等待其结束或停止。" }
             return self.copyModel.running && (overlaps(self.copyModel.source, self.model.destination) || overlaps(self.copyModel.destination, self.model.destination))
                 ? "目录复制正在使用这个备份位置，请等其停止后再执行照片备份。" : nil
         }
@@ -463,9 +488,13 @@ struct BackupView: View {
         window.contentMinSize = NSSize(width: 920, height: 790)
         window.isReleasedWhenClosed = false
         window.delegate = self
-        window.contentView = NSHostingView(rootView: ApplicationTabs(navigation: navigation, photo: model, copy: copyModel))
+        window.contentView = NSHostingView(rootView: ApplicationTabs(navigation: navigation, photo: model, copy: copyModel, camera: cameraModel))
         installStatusItem()
         window.center(); showWindow()
+        if CommandLine.arguments.contains("--camera-preview") {
+            navigation.tab = 2
+            return // Preview never starts automatic backups or modifies saved paths.
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--ui-smoke-test"), CommandLine.arguments.count > index + 1 {
             guard NSRunningApplication.current.activationPolicy == .regular,
                   Bundle.main.url(forResource: "AppIcon", withExtension: "icns") != nil else {
@@ -516,13 +545,14 @@ struct BackupView: View {
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if model.running || copyModel.running {
+        if model.running || copyModel.running || cameraModel.running {
             window.makeKeyAndOrderFront(nil)
             if model.running { model.cancel() }
             if copyModel.running {
                 copyModel.addLog("收到退出请求，先停止复制；等待当前文件结束后再次退出。")
                 copyModel.cancel()
             }
+            if cameraModel.running { cameraModel.addLog("收到退出请求，先停止导入，等待停止后再次退出。"); cameraModel.cancel() }
             model.addLog("请等待当前文件结束，再退出应用。已完成的资源已记录，下次会继续。")
             return .terminateCancel
         }

@@ -13,3 +13,7 @@ xcrun swiftc -swift-version 5 -O -module-cache-path "$PWD/.build/module-cache" \
   Sources/Archive.swift Sources/Layout.swift Sources/DirectoryCopy.swift Tests/Memory/main.swift \
   -framework CryptoKit -o .build/memory-tests
 .build/memory-tests
+xcrun swiftc -swift-version 5 -module-cache-path "$PWD/.build/module-cache" \
+  Sources/Archive.swift Sources/Layout.swift Sources/DirectoryCopy.swift Sources/CameraImport.swift Tests/Camera/main.swift \
+  -framework CryptoKit -framework ImageIO -framework AVFoundation -o .build/camera-tests
+.build/camera-tests

@@ -25,11 +25,11 @@ struct TaskRunRecord: Codable {
 }
 
 enum TaskLogHistory {
-    enum Kind { case photo, directory }
+    enum Kind { case photo, directory, camera }
 
     static func directory(_ kind: Kind) -> URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(kind == .photo ? "PhotoIncrementalBackup/Logs" : "PhotoIncrementalBackup/CopyLogs", isDirectory: true)
+            .appendingPathComponent(kind == .photo ? "PhotoIncrementalBackup/Logs" : (kind == .camera ? "PhotoIncrementalBackup/CameraLogs" : "PhotoIncrementalBackup/CopyLogs"), isDirectory: true)
     }
 
     static func latest(_ kind: Kind, excluding current: URL? = nil) -> URL? {

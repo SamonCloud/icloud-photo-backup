@@ -121,10 +121,12 @@ struct ApplicationTabs: View {
     @ObservedObject var navigation: NavigationModel
     @ObservedObject var photo: BackupModel
     @ObservedObject var copy: CopyModel
+    @ObservedObject var camera: CameraImportModel
     var body: some View {
         TabView(selection: $navigation.tab) {
             BackupView(model: photo).tabItem { Label("照片备份", systemImage: "photo.on.rectangle") }.tag(0)
             DirectoryCopyView(model: copy).tabItem { Label("目录复制", systemImage: "folder") }.tag(1)
+            CameraImportView(model: camera).tabItem { Label("相机导入", systemImage: "camera") }.tag(2)
         }.padding(8)
     }
 }
